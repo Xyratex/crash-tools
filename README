@@ -1,7 +1,8 @@
 
 This tree will build one binary crash extension, install several shell
-script assistive scripts and several sial extensions.  Typing, "make
-install" will do it all.  After that, when you run crash, it will fire off a
+script assistive scripts and several sial extensions.  Typing:
+  make install
+will do it all.  After that, when you run crash, it will fire off a
 script that will figure out what modules need loading and what extensions
 are available for load.  At the end of the crash initialization, you will
 see something like this:
