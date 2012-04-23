@@ -1,0 +1,57 @@
+
+This tree will build one binary crash extension, install several shell
+script assistive scripts and several sial extensions.  Typing, "make
+install" will do it all.  After that, when you run crash, it will fire off a
+script that will figure out what modules need loading and what extensions
+are available for load.  At the end of the crash initialization, you will
+see something like this:
+
+    The modules-to-load commands are configured:
+      ! :> c-cmd.out
+      sys | sed '/^crash>/d'";s/'//g" > c-cmd.sys
+      mod | awk '/not loaded/{print $2}' > c-cmd.out
+      ! echo $(wc -l < c-cmd.out) modules need loading
+      ! bash /root/bin/mk-init-crash find_mods
+    please type '< c-cmd' to invoke them
+
+Sourcing the "c-cmd" file will pack all the derived information into a file
+named "init.crash" and it will put the absurdly long invocation into a
+script named "run-crash".  You can then edit "init.crash" to make any manual
+adjustments before sourcing it by crash.  The "run-crash" script will
+automatically source the file.  The results will look something like this:
+
+    # head -500 init.crash run-crash
+    ==> init.crash <==
+    mod -s   libcfs lustre_kos/libcfs.ko
+    mod -s     lvfs lustre_kos/lvfs.ko
+    mod -s     lnet lustre_kos/lnet.ko
+    mod -s  kgnilnd lustre_kos/kgnilnd.ko
+    mod -s obdclass lustre_kos/obdclass.ko
+    mod -s   ptlrpc lustre_kos/ptlrpc.ko
+    mod -s      osc lustre_kos/osc.ko
+    mod -s   lquota lustre_kos/lquota.ko
+    mod -s      mdc lustre_kos/mdc.ko
+    mod -s      lov lustre_kos/lov.ko
+    mod -s   lustre lustre_kos/lustre.ko
+    mod -s      mgc lustre_kos/mgc.ko
+    extend /root/.crash.d/lustre-ext.so
+    extend /usr/lib64/crash/extensions/dminfo.so
+    extend /usr/lib64/crash/extensions/echo.so
+    extend /usr/lib64/crash/extensions/trace.so
+    extend /usr/lib64/crash/extensions/sial.so
+    extend /usr/lib64/crash/extensions/snap.so
+
+    ==> run-crash <==
+    #! /bin/bash
+    cd /mnt/hgfs/Shared/DATA/DUMPS/bug781329_find_lock_page
+    kernel=vmlinux-2.6.32.45-0.3.2_1.0400.6421-cray_gem_c
+    dump=dump.070040
+    map=System.map-2.6.32.45-0.3.2_1.0400.6421-cray_gem_c
+    crash=/usr/bin/crash
+    export CRASH_EXTENSIONS=/root/.crash.d
+    ini=
+    test -f init.crash && ini="-i init.crash"
+    exec $crash $ini $kernel $map $dump
+
+To see what-all crash has loaded and what new commands they provide,
+type "extend" with no arguments.

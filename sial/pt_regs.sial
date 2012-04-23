@@ -1,0 +1,98 @@
+//  -*- Mode: C -*-
+// Copyright 2007 Cray Inc. All Rights Reserved.
+//
+
+struct cray_minimal_scalar_regs {
+        unsigned long   a1_8 [8-1+1];
+        unsigned long   orig_a1;
+        unsigned int    status;
+        unsigned short  fpc, fps;
+        unsigned long   pc;
+        unsigned long   a63;
+};
+
+// Return getopt style option list
+string
+pt_regs_opt() 
+{ 
+	return ""; 
+}
+
+// Return standard usage message
+string
+pt_regs_usage() 
+{ 
+	return "vaddr_list";
+}
+
+static void
+pt_regs_showusage()
+{
+	printf("usage : pt_regs %s\n", pt_regs_usage());
+}
+
+// called from typing "help pt_regs" within lcrash
+string
+pt_regs_help()
+{
+	return 
+	"Display the pt_regs struct in a readable form.";
+}
+
+#define STATUS_PEND_EXCEPTION_SHIFT     4
+#define STATUS_IP_SHIFT                 16
+#define STATUS_IP_MASK                  0x3f
+#define STATUS_EXCEPTION_CODE_SHIFT     24
+#define STATUS_EXCEPTION_CODE_MASK      0x3f
+#define STATUS_FPC_SHIFT		32
+#define STATUS_FPS_SHIFT		48
+#define CR_CAUSE_PEND_MASK		0x1f
+
+// this is the main function called via sial within lcrash
+// when the user types "pt_regs"
+int 
+pt_regs()
+{
+	unsigned long tmp;
+	struct cray_minimal_scalar_regs *regs;
+	int cnt;
+
+	cnt = 0;
+
+	if (argc < 2) {
+		printf("A pt_regs struct address must be provided.\n");
+		pt_regs_showusage();
+		return;
+	}
+
+	printf("===============================================================================\n");
+	while ( ++cnt < argc ) {
+		regs = (struct cray_minimal_scalar_regs *)atoi(argv[cnt],16);
+
+		printf("pt_regs: 0x%016lx\n", regs);
+		printf("A1: 0x%016lx\t", regs->a1_8[0]);
+		printf("A2: 0x%016lx\t", regs->a1_8[1]);
+		printf("A3: 0x%016lx\n", regs->a1_8[2]);
+		printf("A4: 0x%016lx\t", regs->a1_8[3]);
+		printf("A5: 0x%016lx\t", regs->a1_8[4]);
+		printf("A6: 0x%016lx\n", regs->a1_8[5]);
+		printf("A7: 0x%016lx\t", regs->a1_8[6]);
+		printf("A8: 0x%016lx\t", regs->a1_8[7]);
+		printf("ORIG_A1: 0x%016lx\n", regs->orig_a1);
+		tmp = regs->status;
+		printf("STATUS: 0x%016lx\t", regs->status);
+		printf("Pending Exceptions: 0x%02lx\t",
+			(tmp >> STATUS_PEND_EXCEPTION_SHIFT) & CR_CAUSE_PEND_MASK);
+		printf("fpc: 0x%04x\n", regs->fpc);
+		printf("\t\t\t\tInterrupts Pending: 0x%02lx\t",
+			(tmp >> STATUS_IP_SHIFT) & STATUS_IP_MASK);
+		printf("fps: 0x%04x\n", regs->fps);
+		printf("\t\t\t\tException Code:     0x%02lx\n",
+			(tmp >> STATUS_EXCEPTION_CODE_SHIFT) & STATUS_EXCEPTION_CODE_MASK);
+		printf("PC: 0x%016lx\t", regs->pc);
+		printf("A63: 0x%016lx\n", regs->a63);
+	printf("===============================================================================\n");
+	}
+
+	return 0;
+}

@@ -1,0 +1,636 @@
+/* lustre.c - Lustre crash extensions  -*- Mode: C -*-
+ *
+ * Copyright (C) 2007, Lawrence Livermore National Labs
+ * Auther: Brian Behlendorf
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+int debug = 0;
+
+/* Kernel data structures & defines */
+
+#define PAGE_SIZE               4096
+#define PAGE_SHIFT              12
+#define __PAGE_OFFSET           0xffff810000000000
+#define PAGE_OFFSET             ((unsigned long)__PAGE_OFFSET)
+
+#define __va(x)                 ((unsigned long)(x)+PAGE_OFFSET)
+
+/* three types of trace_data in linux */
+enum {
+        TCD_TYPE_PROC = 0,
+        TCD_TYPE_SOFTIRQ,
+        TCD_TYPE_IRQ,
+        TCD_TYPE_MAX
+};
+
+#define TCD_MAX_TYPES      8
+
+/**
+ * list_entry - get the struct for this entry
+ * @ptr:        the &struct list_head pointer.
+ * @type:       the type of the struct this is embedded in.
+ * @member:     the name of the list_struct within the struct.
+ */
+#define list_entry(ptr, type, member) \
+        ((type *)((char *)(ptr)-(unsigned long)(&((type *)0)->member)))
+
+/**
+ * list_for_each        -       iterate over a list
+ * @pos:        the &struct list_head to use as a loop counter.
+ * @head:       the head for your list.
+ */
+#define list_for_each(pos, head) \
+        for (pos = (head)->next; pos != (head); pos = pos->next)
+
+/**
+ * list_for_each_entry  -       iterate over list of given type
+ * @pos:        the type * to use as a loop counter.
+ * @head:       the head for your list.
+ * @member:     the name of the list_struct within the struct.
+ */
+#define list_for_each_entry(pos, head, member)                          \
+        for (pos = list_entry((head)->next, typeof(*pos), member);      \
+             &pos->member != (head);                                    \
+             pos = list_entry(pos->member.next, typeof(*pos), member))
+
+
+
+/* _opt returns getopt formatted option string */
+
+string lctl_dk_opt()
+{
+        return "c:dhp:t:w:";
+}
+
+/* standard usage message */
+string lctl_dk_usage()
+{
+        return "[-d] [-h] [-c cpu -p page_addr] [-t tg_addr] [-w file] jackass\n";
+}
+
+/* _showusage actually does the usage output */
+static void lctl_dk_showusage()
+{
+        printf("usage: lctl_dk %s\n",lctl_dk_usage());
+}
+
+
+/* _help is called from typing "help $functiion" */
+string lctl_dk_help()
+{
+        return lctl_dk_usage();
+}
+
+
+unsigned long page_to_pfn(struct page *page)
+{
+        unsigned long pfn;
+
+        /* non- NUMA dumps */
+        if (exists("mem_map")) {
+
+                mm =  *(unsigned long long *)mem_map;
+                pfn = ((unsigned long) page - mm);
+                
+                /* divide by size! this is structure math, not memory math! */
+                pfn = (pfn/sz) << PAGE_SHIFT;
+                return pfn;
+        }
+
+        else {
+                /* NUMA case */ 
+                struct pglist_data * next_pgdat;
+                unsigned long tmp;
+
+                int sz = sizeof(struct page);
+
+                tmp = *(unsigned long*) pgdat_list;
+                next_pgdat = (struct pglist_data *)tmp;
+
+                while (next_pgdat) {
+                        struct page * map;
+                        unsigned long start_pfn, spanned_pages;
+                        unsigned long page_addr = (unsigned long) page;
+                        unsigned long map_addr;
+
+                        map = next_pgdat->node_mem_map;
+                        map_addr = (unsigned long) map;
+                        start_pfn = next_pgdat->node_start_pfn;
+                        spanned_pages = next_pgdat->node_spanned_pages;
+
+                        if (debug)
+                                printf("scanning with page: %lx map: %lx "
+                                       "map_addr: %lx sz: %lx, spanned_pages: %lx\n",
+                                        page_addr, map, map_addr, sz, spanned_pages);
+                        if ((page_addr > map_addr) &&
+                            (page_addr - map_addr)/sz < spanned_pages ) {
+                                pfn = start_pfn + (page_addr - map_addr)/sz;
+                                //printf("returning pfn: %lx\n", pfn);
+                                return pfn;
+                        }
+                        next_pgdat = next_pgdat->pgdat_next;
+                }
+                /* IF we get here, no acceptable pgdat found */
+                printf("ERROR uh-oh, need to add other scanning here!\n");
+                return 0;
+        }
+}
+
+void *page_address(struct page *page)
+{
+        unsigned long pfn;
+        unsigned long long mm, mapped;
+        int sz;
+
+        if (debug)
+                printf("page_address(%lx)\n", page);
+
+        if ((unsigned long) page < PAGE_OFFSET) {
+                printf("ERROR: ignoring bogus page address of %lx\n", page);
+        }
+
+        sz = sizeof(struct page);
+
+        pfn = page_to_pfn(page);
+
+        if (pfn == 0) 
+                return pfn;
+
+        mapped = __va(pfn << PAGE_SHIFT);
+        
+        if (debug)
+                printf("page %lx pfn %lx mapped %lx\n", page, pfn, mapped);
+
+        return mapped;
+}
+
+int print_msg(struct ptldebug_header *hdr, char *text)
+{
+        string end;
+        string file, fn, msg; 
+        int msg_len, i;
+        char *text_save;
+
+        text_save = text;
+
+        if (debug)
+                printf("start text: %lx\n", text);
+
+        if (hdr->ph_len > PAGE_SIZE) {
+                printf("FATAL ERROR: bogus header found len %lx > PAGE_SIZE ",
+                        "ERROR: hdr %lx len %d text %lx\n",
+                        hdr->ph_len, hdr, hdr->ph_len, text);
+                printf("ERROR: hdr %lx len %d text %lx\n",
+                         hdr, hdr->ph_len, text);
+                return -1;
+        }
+
+        file = getstr(text);
+        text += strlen(file) + 1;
+
+        fn = getstr(text);
+        text += strlen(fn) + 1;
+
+        if (debug)
+                printf("found msg starting at %lx\n", text);
+
+        msg = getstr(text);
+
+        msg_len = strlen(msg);
+
+        /* check last 3 chars for newline...yes sometimes it is 3 for
+         * some reason strlen sometimes goes further to get a null
+         * terminated string we really should just search for the
+         * newline and call it good, but I am lazy
+         */
+        for (i = (msg_len - 3); i <= msg_len; i++) {
+                string end;
+                end = substr(msg, i, 1);
+                if (debug)
+                        printf("msg has msg[%d] char '%s'\n", i, end);
+                if (end == "\n") {
+                        if (debug)
+                                printf("shortenting msg by %d due to "
+                                       "trailing newline\n", (msg_len - i));
+                        msg_len = i;
+                        msg = getnstr(text, msg_len);
+                        break;
+                }
+        }
+
+        if (debug)
+                printf("msg_len %d for msg '%s'\n", msg_len, msg);
+
+        text += msg_len;
+
+        printf("%08x:%08x:%u:%u.%06llu:%u:%u:%u:(%s:%u:%s()) %s",
+                hdr->ph_subsys, hdr->ph_mask, hdr->ph_cpu_id,
+                hdr->ph_sec, (unsigned long long)hdr->ph_usec,
+                hdr->ph_stack, hdr->ph_pid, hdr->ph_extern_pid,
+                file, hdr->ph_line_num, fn, msg);
+
+        return (text - text_save);
+
+}
+
+/* Given a pointer to a page frame append the assoicated linear
+ * address range to the passed file descriptor.
+ */
+static int
+lustre_print_page_frame(struct trace_page *tg)
+{
+        int retry = 0;
+        ssize_t rc, count = 0;
+        ulong kaddr, tmpaddr;
+        int hdr_size = sizeof(struct ptldebug_header);
+
+        if (debug)
+                printf("lustre_print_page_frame(%lx)\n", tg);
+
+        kaddr = page_address(tg->page);
+
+        if (kaddr == 0) {
+                printf("ERROR: page %lx, addr %lx\n", tg->page, kaddr);
+                return 0;
+        }
+
+        tmpaddr = kaddr;
+        while ((tmpaddr + hdr_size) < (kaddr + tg->used)) {
+                struct ptldebug_header *hdr;
+
+                hdr = (struct ptldebug_header *)tmpaddr;
+
+                tmpaddr += hdr_size;
+
+                if (debug) {
+                        printf("count %d hdr %lx len %d tmpaddr %lx "
+                               "kaddr+used %lx\n", count, hdr, hdr->ph_len,
+                               tmpaddr, kaddr + tg->used);
+                }
+
+                if ((hdr->ph_len - hdr_size) <= 0 ) {
+                        printf("WARNING: Skipping short header: count %d "
+                               "hdr %lx len %d tmpaddr %lx kaddr+used %lx\n",
+                               count, hdr, hdr->ph_len, tmpaddr, kaddr + tg->used);
+                }
+
+                rc = (ulong) print_msg(hdr, (char *)tmpaddr);
+
+                if (rc != (hdr->ph_len - hdr_size)) {
+                        printf("ERROR: print_msg returned %d, not %d tg %lx "
+                                "hdr %lx len %d tmpaddr %lx kaddr+used %lx\n",
+                                rc, (hdr->ph_len - hdr_size),
+                                tg, hdr, hdr->ph_len, tmpaddr, kaddr + tg->used);
+                }                       
+                tmpaddr += rc;
+
+                count += hdr->ph_len;
+        }
+
+        return count;
+}
+
+/* helper function - allows us to use it in the main loop too */
+int process_trace_page(struct trace_page *tg)
+{
+        int rc = 0;
+
+        rc = lustre_print_page_frame(tg);
+
+        if (tg->used != rc) {
+                printf("WARNING: got less data from page than expected, likely "
+                       "non-fatal wanted %d got %d: tg: %lx tg->page: %lx\n", 
+                        tg->used, rc, tg, tg->page);
+        }
+
+        return rc;
+}
+
+/* Walk the list of trace_pages linked off the passed list_head pointer */
+unsigned long
+lustre_walk_trace_pages(int cpu, struct list_head *pages)
+{
+        struct trace_page *tage;
+        int rc, i = 0;
+        ulong ret = 0;
+        int mycount = 0;
+        struct list_head *tmp;
+
+        if (debug) 
+                printf("lustre_walk_trace_pages(%d, 0x%lx)\n", cpu, pages);
+
+        if (debug) {
+                printf("pages %p pages->next %p pages->prev %p\n",
+                        pages, pages->next, pages->prev);
+        }
+
+        for (tmp = pages->next; tmp != pages; tmp = tmp->next) {
+                struct trace_page *tg;
+
+                tg = (struct trace_page *)
+                    ((char *)tmp -
+                     (unsigned long)(&((struct trace_page *)0)->linkage));
+
+                mycount++;
+
+                if (debug)
+                        printf("mycount %d tmp->prev %p tmp %p tmp->next %p "
+                               "pages %p tg %p tg->used %d tg->cpu %d\n",
+                                mycount, tmp->prev, tmp, tmp->next, pages, tg,
+                               tg->used, tg->cpu);
+
+                /* Ensure this page belongs to the CPU list being walked */
+                if (tg->cpu != cpu) {
+                        printf("WARNING: Skipping trace page 0x%lx which is "
+                              "owned by CPU %d not CPU %d\n",
+                              tg, tg->cpu, cpu);
+                        continue;
+                }
+
+                if ((tg->used < 0) || (tg->used > 4096)) {
+                        printf("WARNING Trace page 0x%lx has bogus used "
+                              "size (%d)\n", tg, tg->used);
+                        continue;
+                }
+
+                /* skip unused pages */
+                if (tg->used == 0)
+                        continue;
+
+                if (tg->page == 0) {
+                        printf("WARNING: either busted linked list due to "
+                               "NULL page pointer or I don't know what I'm "
+                               "doing here\n");
+                        printf("WARNING: tg: %lx tg->page: %lx tmp: %lx "
+                               "tmp->next %lx pages: %lx\n",
+                                tg, tg->page, tmp, tmp->next, pages);
+                        printf("WARNING: continuing after NULL page pointer\n");
+                        continue;
+                }
+
+                rc = process_trace_page(tg);
+                if (tg->used != rc) {
+                        printf("tmp: %lx tmp->next %lx pages: %lx\n",
+                               tmp, tmp->next, pages);
+                }
+
+                /* ret returns number of pages */
+                if (rc >= 0)
+                        ret += 1;
+                else {
+                        printf("WARNING: Exiting early, rc = %d\n", rc);
+                        printf("WARNING: tg: %lx tg->page: %lx tmp: %lx "
+                               "tmp->next %lx pages: %lx\n",
+                                tg, tg->page, tmp, tmp->next, pages);
+                        return ret;
+                }
+        }
+
+        return ret;
+}
+
+/* Aquire the debug page list head pointer for this CPU and walk them */
+static int
+lustre_walk_cpus(int cpu)
+{
+        int rc, size;
+        int type;
+        struct list_head * pages;
+        unsigned long wanted = 0, actual;
+        unsigned long total = 0;
+        unsigned long tcd_type_data;
+        struct trace_cpu_data *tcd;
+        
+        if (debug)
+                printf("lustre_walk_cpus(%d)\n", cpu);
+
+        /* taken from tcd_for_each */
+        for (type = 0; type < TCD_TYPE_MAX; type++) {
+                ulong tmp;
+                string kind;
+
+                tcd_type_data = (unsigned long)trace_data + (sizeof(long) * type);
+        
+                if (debug)
+                        printf("trace_data[%d] = %lx\n", type, tcd_type_data);
+
+                tmp = *(unsigned long *) tcd_type_data;
+                tmp += sizeof(union trace_data_union) * cpu;
+                tcd = (struct trace_cpu_data *)tmp;
+
+                if (debug) {
+                        printf("type %d cpu %d tcd %lx\n", type, cpu, tcd);
+                        printf("cur_pages %d daemon_pages %d stock_pages %d\n",
+                                tcd->tcd_cur_pages, tcd->tcd_cur_daemon_pages,
+                                tcd->tcd_cur_stock_pages);
+                }
+
+                /* make sure we got valid data */
+                if ((tcd->tcd_cpu != cpu) || (tcd->tcd_type != type)) {
+                        printf("ERROR: tcd: %lx has bogus tcd_cpu(%d) or "
+                               "tcd_type(%d)\n",
+                                tcd, tcd->tcd_cpu, tcd->tcd_type);
+                        return -1;
+                }
+
+                if (tcd->tcd_cur_pages) {
+                        wanted = tcd->tcd_cur_pages;
+                        pages = &tcd->tcd_pages;
+                        kind = "cur";
+                }
+                else if (tcd->tcd_cur_daemon_pages) {
+                        wanted = tcd->tcd_cur_daemon_pages;
+                        pages = &tcd->tcd_daemon_pages;
+                        kind = "daemon";
+
+                }
+                else if (tcd->tcd_cur_stock_pages) {
+                        wanted = tcd->tcd_cur_stock_pages;
+                        pages = &tcd->tcd_stock_pages;
+                        kind = "stock";
+
+                }
+                else {
+                        printf("cpu %d type %d had no pages. tcd %lx\n",
+                               cpu, type, tcd); 
+                        continue;
+                }
+
+                if (debug)
+                        printf("%s_pages: tcd %lx wanted %d pages %lx\n",
+                               kind, tcd, wanted, pages);
+
+                actual = lustre_walk_trace_pages(cpu, pages);
+
+                if (debug)
+                        printf("got %d %s pages\n", actual, kind);
+
+                total += actual;
+                if (actual != wanted) {
+                        printf("WARNING: type %d on cpu %d got fewer %s_pages: "
+                               "expected %d actual %d tcd: %lx pages: %lx\n", 
+                                type, kind, wanted, actual, tcd, pages);
+                }
+        }
+
+        return total;
+}
+
+void
+cmd_lustre_log()
+{
+        int i, rc, count, total = 0, fd;
+        int online_cpus = 0;
+        int lustre_syms, kernel_syms;
+
+        /* symbols below that are commented out are data structure types and
+         * I'm not sure how to see if they exist - exists() doesn't seem to
+         * work for that
+         */
+
+        kernel_syms[0] = "max_cpus";
+        kernel_syms[1] = "cpu_present_map";
+        //kernel_syms[2] = "list_head";
+        
+        lustre_syms[0] = "trace_data";
+        //lustre_syms[1] = "trace_data_union";
+        //lustre_syms[2] = "trace_cpu_data";
+        //lustre_syms[3] = "ptldebug_header";
+        //lustre_syms[4] = "trace_page";
+
+        for (i in kernel_syms) {
+                if (!exists(kernel_syms[i])) {
+                        printf("kernel symbol %s does not exist, is your "
+                               "kerntypes correct?\n",
+                                kernel_syms[i]);
+                        return 2;
+                }
+        }
+        if (!exists("mem_map") &&
+            !exists("zone_table") &&
+            !exists("pgdat_list")) {
+                printf("Can't resolve mem_map, zone_table or pgdat_list, "
+                       "not able to do page_to_pfn\n");
+                return 1;
+        }
+
+        /* check for some Lustre symbols */
+
+        for (i in lustre_syms) {
+                if (!exists(lustre_syms[i])) {
+                        printf("Lustre symbol %s does not exist, do you have "
+                               "Lustre in the kerntypes\n",
+                                lustre_syms[i]);
+                        return 2;
+                }
+        }
+
+        if (debug)
+                printf("Going to loop through %d possible cpus\n",
+                       *(long *)max_cpus);
+
+        for (i = 0; i < *(long *)max_cpus; i++) {
+
+                if ((*(long *)cpu_present_map) >> i) {
+                        online_cpus++;
+                        if (debug)
+                                printf("CPU %i is online\n", i);
+                }
+                else {
+                        if (debug)
+                                printf("CPU %i is offline\n", i);
+                        continue;
+                }
+                count = 0;
+
+                rc = lustre_walk_cpus(i);
+                if (rc >= 0)
+                        count += rc;
+                else
+                        break;
+
+                if (debug)
+                        printf("Dumped %d debug pages from CPU %d\n", count, i);
+                total += count;
+        }
+
+        printf("Dumped %d total debug pages from %d CPUs\n",
+              total, online_cpus);
+        return 0;
+
+}
+
+
+void lctl_dk(void)
+{
+
+        char *fname;
+
+        if (hflag) {
+                lctl_dk_showusage();
+                return 0;
+        }
+
+        if (dflag) {
+                printf("Turning on debugging output\n");
+                debug = 1;
+        } else {
+                debug = 0;
+        }
+
+        if (tflag) {
+                struct trace_page *tg;
+                int rc;
+
+                tg = (struct trace_page *)atoi(targ, 16);
+                printf("Debugging specific trace page @ 0x%lx\n", tg);
+
+                rc = process_trace_page(tg);
+
+                return;
+        }
+
+        if (pflag) {
+                struct list_head *pages;
+                int cpu, actual;
+
+                if (!cflag) {
+                        printf("please specify the cpu\n");
+                        lctl_dk_showusage();
+                        return -1;
+                }
+
+                cpu = atoi(carg, 16);
+                pages = (struct list_head *)atoi(parg, 16);
+                printf("Debugging specific page set @ 0x%lx for cpu %d\n",
+                       pages, cpu);
+
+                actual = lustre_walk_trace_pages(cpu, pages);
+
+                printf("got %d pages\n", actual);
+
+                return;
+        }
+
+        cmd_lustre_log();
+
+}
+/*
+ * Local Variables:
+ * mode: C
+ * c-file-style: "stroustrup"
+ * indent-tabs-mode: nil
+ * c-basic-offset: 8
+ * End:
+ *
+ * end of lctl_dk.sial */

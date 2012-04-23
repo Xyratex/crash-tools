@@ -1,0 +1,378 @@
+/* -*- Mode: C -*-
+
+	Immediately below is a simple command example.
+	Refer to lkcdutils/README.sial and lkcdutils/libsial/README
+	@ http://cvs.sourceforge.net/cgi-bin/cvsweb.cgi/?cvsroot=lkcd
+	for information on the sial implementation for lcrash and sial
+	itself. README.sial gives the list of #define available in
+	the context of the macro.
+
+	Also in here is a ps command implementation.
+	The -l and -t options are not implemented yet. 
+	The -t functionality could be implented by defining
+	the missing functions.
+
+	The -h option shows a hierarchical list of processes.
+	It makes extensive use of the dynamic arrays.
+
+	The -l option that should show the entire command line
+	is not working because of a failing access to process
+	private space where this command string resides... I
+	need to talk with Tom about this. If you figure it out
+	let me know.
+
+	lucc@sgi.com
+*/
+typedef struct task_struct task_t;
+
+void
+walk_tasks(string callback)
+{
+struct task_struct *ts, *tsp;
+
+#if LINUX_2_6_X
+	if(exists("init_task")) {
+		ts=(struct task_struct *)init_task;
+#else
+	if(exists("init_tasks")) {
+		ts=*(struct task_struct **)init_tasks;
+	} else if(exists("init_task_union")) {
+		ts=(struct task_struct *)init_task_union;
+#endif		
+	} else {
+
+		printf("Task list not found!\n");
+		exit(1);
+	}
+
+	tsp=ts;
+
+	callback((task_t*)0, 0);
+
+	do {
+
+		if(!callback((task_t*)tsp, 1)) break;
+#if LINUX_2_6_X
+		{
+			unsigned long tasks;
+			tasks = (unsigned long)(tsp->tasks.next);
+			tsp = (struct task_struct *)((unsigned long)(tsp->tasks.next) - 
+				((unsigned long)&(tsp->tasks) - (unsigned long)tsp));
+		}
+#else
+		tsp = tsp->next_task;
+#endif
+
+	} while(tsp != ts);
+
+	callback((task_t*)0, 2);
+}
+
+/*
+        Get some of the processes address space attributes.
+*/
+
+int getasattr(task_t *t, int f)
+{
+
+	if(!t->mm) return 0;
+
+	switch(f) {
+
+		case 1:
+#if SLES10
+			return t->mm->_file_rss.counter + t->mm->_anon_rss.counter;
+#else
+			return t->mm->rss;
+#endif
+		case 2:
+			return t->mm->total_vm;
+
+		default:
+			printf("Unknown getasattr function [%d]\n", f);
+			return 0;
+	}
+	
+}
+
+string
+get_proc_cmd(task_t *t, int l)
+{
+	// long args not implemented at the moment.
+	// creates a loop in klib
+	if(0 && l) {
+
+		char *s=(char*)t->mm->arg_start;
+		char *e=(char*)t->mm->arg_end;
+		string cmd="";
+
+		if(!s) return "";
+
+		// args have address only menaingful for task space
+		printf("settask=%d\n", settask(t));
+
+		// strcat all parameters 
+		while(s < e) {
+
+			string thisarg=getstr(s);
+
+			cmd=cmd+" "+thisarg;
+			s += strlen(thisarg)+1;
+		}
+
+		return cmd;
+
+	} else {
+
+		return getstr(t->comm);
+	}
+}
+
+void
+print_proc(task_t *t)
+{
+int rss, size;
+string cmd;
+
+	// get the command line string
+	// lflag is set from the icrash command line with '-l'
+	if(lflag)
+		cmd = get_proc_cmd(t, 1);
+	else
+		cmd = get_proc_cmd(t, 0);
+
+	rss=getasattr(t, 1);
+	size=getasattr(t, 2);
+
+	printf("0x%p %6d %6d %6d %6d %#9x %5d:%-5d %s\n"
+		, t
+		, t->uid
+		, t->pid
+#if LINUX_2_6_X
+		, t->parent->pid
+#else
+		, t->p_pptr->pid
+#endif
+		, t->state
+		, t->flags
+		, size
+		, rss
+		, cmd
+		);
+}
+
+/*
+	Do the real work for a ps
+*/
+int 
+dops(task_t *t, int mode)
+{
+static int np;
+
+	switch(mode) {
+
+	case 0:
+		//
+		// the %> format prints 8 characters (like the one following the '>') on a 32 bit
+		// system and does nothing on a 64 bit system. This permits seamless alignment of
+		// of the header and fields on either types of systems.
+		//
+		// ex: %>- print '--------' on a 32bit and nothing on a 64bit.
+		//
+		printf("              ADDR    UID    PID   PPID  STATE     FLAGS  SIZE:RSS   NAME\n");
+		printf("===================================================================================\n");
+		np=0;
+	break;
+	case 1:
+		print_proc(t);
+		np++;
+	break;
+	case 2:
+		printf("===================================================================================\n");
+		printf("%d process%s found\n", np, np>1?"es":"");
+	break;
+	}
+	return 1;
+}
+
+string
+ps_opt() 
+{ 
+	return "lth"; 
+}
+
+string
+ps_usage() 
+{ 
+	return "[-l] [-t] [-h]\n"; 
+}
+
+static void
+ps_showusage()
+{
+	printf("usage : ps %s\n", ps_usage());
+}
+
+string
+ps_help()
+{
+	return 
+
+// in sial "xxx" is a type 'string' and the + operator is supported.
+// char* refers to a string address in the image and char[] is illegal
+// except in structure or union declarations.
+//
+"This command displays various information about processes.\n\n" +
+"-t Give a list of the current timers for each threads " +
+"and a aproximated elaps time (in seconds) in the corresponding state.\n\n" +
+"-l Show the complete command line w/ arguments. (not implemented yet)\n\n" +
+"-h show the hiearchy of processes.";
+
+}
+
+int
+dotimer(task_t *t, int mode)
+{
+	static int		np;
+	struct timer_list	*tlp, *tls, *tln;
+	string			name, sym;
+	__u64			expires, fsym;
+	__u32		ip, fnbytes;
+
+	switch(mode) {
+
+		case 0:
+			printf("Function            Expires      Pid             Name\n");
+			printf("=====================================================\n");
+			np=0;
+		break;
+
+		case 1:
+		{
+			name = getnstr(t->comm, 16);
+			tls = &(t->real_timer);
+			tln = tls;
+
+			do {
+				expires = tln->expires;
+				fsym = (__u64)tln->function;
+				ip = *(__u32 *)(fsym - sizeof(__u32));
+				fnbytes = ip >> 18 & 0x0ff;
+				fsym -= fnbytes;
+				sym = getnstr((char *)fsym, 16);
+
+				tlp = (struct timer_list *)
+					((struct list_head *)tln)->prev;
+				tln = (struct timer_list *)
+					((struct list_head *)tln)->next;
+				printf("%12s %10lld %8d %16s\n",
+					sym, expires, t->pid, name);
+				
+			} while ((tln != 0) &&
+				 (tln != 0x00100100) &&
+				 (tln != tls) &&
+				 (tln != tlp));
+
+			np++;
+		}
+		break;
+
+		case 2:
+			printf("=====================================================\n");
+			printf("%d process%s found\n", np, np>1?"es":"");
+		break;
+	}
+	return 1;
+}
+
+#define MAXLEV 10
+static void
+pindent(int level)
+{
+int i;
+	for(i=0;i<level;i++) printf("  ");
+}
+
+static int procs;
+
+static void
+prlevel(int pidx, int level)
+{
+int i;
+
+	// skip process pid 0
+	if(pidx) {
+		pindent(level);
+		dops(procs[pidx][0], 1);
+	}
+
+	for(i in procs[pidx]) {
+
+		if(!i) continue;
+		prlevel(i, level+1);
+	}
+}
+
+int
+pstree(task_t *t, int mode)
+{
+
+	switch(mode) {
+
+		case 0:
+			dops((task_t*)0, 0);
+		break;
+
+		case 1:
+#if LINUX_2_6_X
+			procs[t->parent->pid][t->pid]=t;
+#else
+			procs[t->p_pptr->pid][t->pid]=t;
+#endif
+			procs[t->pid][0]=t;
+		break;
+
+		case 2:
+			// start at level 0 pid 0
+			prlevel(0, 0);
+			dops((task_t*)0, 2);
+		break;
+	}
+	return 1;
+}
+int 
+ps()
+{
+	//
+	// for functions that are command entry points, sial
+	// defines argv[] and argc as global variables.
+	// argv[0] is set to the entry point name e.g. "ps"
+	//
+	// Variables for each specified options will exists
+	// ex: bflag. If an option has an associated parameter
+	// then a corresponding global ?arg will exists.
+	// ex: int bflag and string barg.
+	//
+	if(argc > 1) ps_showusage();
+	else if(tflag)
+
+		/*
+			With sial function callbacks are implemented using 
+			'string' variable. At the time of the call sial will
+			use the value of a string variable to call the 
+			corresponding function.
+
+			Below we call walk_tasks() passing the name of the 
+			function to callback as a tring value.
+		*/
+		walk_tasks("dotimer");
+
+	else if(hflag)
+
+		walk_tasks("pstree");
+
+	else
+		walk_tasks("dops");
+
+	return 1;
+}

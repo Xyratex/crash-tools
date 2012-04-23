@@ -1,0 +1,150 @@
+//  -*- Mode: C -*-
+// Copyright 2006 Cray Inc. All Rights Reserved.
+//
+
+typedef unsigned long long __u64;
+typedef __signed__ long long __s64;
+typedef struct task_struct task_t;
+
+// Return getopt style option list
+string
+ptwalk_opt() 
+{ 
+	return "m:"; 
+}
+
+// Return standard usage message
+string
+ptwalk_usage() 
+{ 
+	return "[-m mm_struct] vaddr_list";
+}
+
+static void
+ptwalk_showusage()
+{
+	printf("usage : ptwalk %s\n", ptwalk_usage());
+}
+
+// called from typing "help ptwalk" within lcrash
+string
+ptwalk_help()
+{
+	return 
+	"Display a page table walk for each entry in vaddr_list. Entries in "+
+	"vaddr_list must be virtual adresses. when the -m command line option "+
+	"is specified, treat the accompanying parameter as an mm_struct "+
+	"pointer to use when determining memory mapping.";
+}
+
+// this is the main function called via sial within lcrash
+// when the user types "ptwalk"
+int 
+ptwalk()
+{
+	unsigned long pgd;
+	unsigned long pmd;
+	unsigned long pt;
+	unsigned long pte;
+	unsigned long vaddr;
+	unsigned long procid;
+	unsigned long page_shift;
+	unsigned long pg_shift;
+	unsigned long p_offset;
+	unsigned long ppn;
+	unsigned long paddr;
+	unsigned long table;
+	unsigned long idx;
+	unsigned long index;
+	unsigned long entry;
+
+	int cnt;
+
+	if (mflag) {
+		if (!atoi(marg)) {
+			printf("Invalid [-m mm_struct]\n");
+			ptwalk_showusage();
+			return 1;
+		}
+		pgd = (unsigned long)atoi(marg);
+		pgd = (unsigned long)((struct mm_struct *)pgd)->pgd;
+	} else {
+		if (exists("init_mm")) {
+			pgd = (unsigned long)((struct mm_struct *)init_mm)->pgd;
+		} else {
+			printf("Cannot find init_mm for translations\n");
+			printf("A pgd from a mm_struct must be provided.\n");
+			ptwalk_showusage();
+			return 1;
+		}
+	}
+
+	cnt = 0;
+
+	if (argc < 2) {
+		printf("A virtual address to translate must be provided.\n");
+		ptwalk_showusage();
+		return;
+	}
+
+	printf("===============================================================================\n\n");
+	while ( ++cnt < argc ) {
+		vaddr = (unsigned long)atoi(argv[cnt]);
+		
+		pmd = *((unsigned long *)pgd + ((vaddr >> 42) & 0x1fff));
+		pmd &= 0x000003ffffff0000;
+		pmd |= 0xc000000000000000;
+		
+		pt = *((unsigned long *)pmd + ((vaddr >> 29) & 0x1fff));
+		pt &= 0x000003ffffff0000;
+		pt |= 0xc000000000000000;
+
+		pte = *((unsigned long *)pt + ((vaddr >> 16) & 0x1fff));
+
+		procid = pte & (0x7fff << 40);
+		page_shift = (pte & 0x1f) >> 2;
+		pg_shift = ((page_shift & 4) >> 1) + (2 * page_shift) + 16;
+		p_offset = vaddr & ((1 << pg_shift) - 1);
+
+		ppn = ((pte >> 16) & ((1 << 20) - 1)) << pg_shift;
+		paddr = (1 << 63) | procid | ppn | p_offset;
+
+		printf("VADDR: 0x%lx   PADDR: 0x%lx\n", vaddr, paddr);
+
+		printf("\n                  PAGE_TABLE OFFSET               ADDR              ENTRY\n");
+		printf("          ---------------------------------------------------------------\n");
+		table = pgd;
+		idx = (vaddr >> 42) & 0x1fff;
+       	 	index = (unsigned long)((unsigned long *)table + idx);
+		entry = *(unsigned long *)index;
+		printf("     pgd: 0x%lx 0x%04lx 0x%lx 0x%lx\n",
+			table, idx*8, index, entry);
+
+		entry &= 0x000003ffffff0000;
+		entry |= 0xc000000000000000;
+
+		table = entry;
+		idx = (vaddr >> 29) & 0x1fff;
+      		 	index = (unsigned long)((unsigned long *)table + idx);
+		entry = *(unsigned long *)index;
+		printf("     pmd: 0x%lx 0x%04lx 0x%lx 0x%lx\n",
+			table, idx*8, index, entry);
+
+		entry &= 0x000003ffffff0000;
+		entry |= 0xc000000000000000;
+
+		table = entry;
+		idx = (vaddr >> 16) & 0x1fff;
+      		 	index = (unsigned long)((unsigned long *)table + idx);
+		entry = *(unsigned long *)index;
+		printf("     pte: 0x%lx 0x%04lx 0x%lx 0x%lx\n",
+			table, idx*8, index, entry);
+
+		printf("          ---------------------------------------------------------------\n");
+		printf("\n");
+	}
+
+	printf("===============================================================================\n");
+
+	return 0;
+}

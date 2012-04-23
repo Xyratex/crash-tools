@@ -1,0 +1,41 @@
+Designed to be built stand alone for crash version crash-4.0-4.1.  The 
+included defs.h file will likely work for similar versions of crash but
+if your building for a different release best to compile using that defs.h.
+Alternately you can add the lustre.c file to the 'extensions' directory
+when building crash and simply add it to the makefile.
+
+Build as follows:
+
+  make
+
+  ...or if you prefer...
+
+  gcc -nostartfiles -shared -rdynamic -o lustre.so lustre.c -fPIC -D<arch>
+
+Example usage:
+
+  # Launch crash against a crash dump or live kernel to extract
+  # and re-assemble the binary lustre debug log.
+  > crash <your kernel crash dump> <your vmlinux>
+    ...
+    crash> mod -S
+      ...
+    crash> extend lustre.so
+      lustre.so: shared object loaded
+    crash> lustre -l /tmp/foo.dl
+      lustre: Dumped 2560 debug pages from CPU 0
+      lustre: Dumped 2560 debug pages from CPU 1
+      lustre: Dumped 2560 debug pages from CPU 2
+      lustre: Dumped 2560 debug pages from CPU 3
+      lustre: Dumped 2560 debug pages from CPU 4
+      lustre: Dumped 2560 debug pages from CPU 5
+      lustre: Dumped 2560 debug pages from CPU 6
+      lustre: Dumped 2560 debug pages from CPU 7
+      lustre: Dumped 20480 total debug pages from 8 CPUs to /tmp/foo.dl
+    crash> quit
+
+  # Convert the binary debug log to a text debug log
+  > /usr/sbin/lctl df /tmp/foo.dl >/tmp/foo.dk
+
+  # View your debug log
+  > vim /tmp/foo.dk

@@ -1,0 +1,495 @@
+//  -*- Mode: C -*-
+// Copyright 2006 Cray Inc. All Rights Reserved.
+//
+
+typedef unsigned long long __u64;
+typedef __signed__ long long __s64;
+typedef struct task_struct task_t;
+
+//
+// Return getopt style option list
+//
+string
+ut_opt() 
+{ 
+	return "n:c:hui"; 
+}
+string utrace_opt() { return ut_opt(); }
+
+//
+// Return standard usage message
+//
+string
+ut_usage() 
+{ 
+	return "[-n count] [-c cpu] [-u | -i] [-h]\n";
+}
+string utrace_usage() { return ut_usage(); }
+
+static void
+ut_showusage()
+{
+	printf("usage : ut %s\n", ut_usage());
+}
+static void utrace_showusage() { return ut_showusage(); }
+
+//
+// called from typing "help ut" within lcrash
+//
+string
+ut_help()
+{
+	return 
+
+// in sial "xxx" is a type 'string' and the + operator is supported.
+// char* refers to a string address in the image and char[] is illegal
+// except in structure or union declarations.
+//
+"This command displays various information from UTRACE/ITRACE buffers.\n\n" +
+"\t-n Count of entries to list. Default=10\n" +
+"\t-c Which CPU buffers to list. Default=0\n" +
+"\t-u Only print Utrace buffers.\n" +
+"\t-i Only print Itrace buffers.\n" +
+"\t-h Display trace headers.\n" +
+"\n";
+
+}
+string utrace_help() { return ut_help(); }
+
+typedef struct {
+	__u64   name;
+	__u64   rtc;
+	__u64   w1;
+	__u64   w2;
+} trace_entry_t;
+
+typedef struct {
+	__u64   name;
+	__u64   w3;
+	__u64   w4;
+	__u64   w5;
+} trace_plus_entry_t;
+
+typedef struct {
+	union {
+		trace_entry_t   *Entry[sizeof(__u64) / sizeof(trace_entry_t *)];
+		__s64	   Addr;	   /* Trace buffer address       */
+	} u;
+	__s64		   numentmask;     /* #-entries - 1	      */
+} trace_head_t;
+
+struct trace_info_s {
+	trace_head_t    ut_active;
+	trace_head_t    it_active;
+	__u64	   	next_ut_active;
+	__u64	   	next_it_active;
+} *trace_info;
+
+typedef struct {
+	__u64	   	magic;		/* find the buffer in a memory dump */
+	trace_head_t    active;		/* current active trace buffer */
+	trace_head_t    alternate;	/* alternate trace buffer */
+	__u64	   	name;		/* buffer name */
+	__u64	   	flags;		/* state flags */
+	trace_head_t    sv_active;	/* panic save for active */
+} tracebuf_t;
+
+#define ut_entry	u.Entry[0]
+#define ut_addr		u.Addr
+
+/*
+ * flags values
+ */
+#define         UT_INIT         0x00001 /* - trace buffer initialized */
+#define         UT_PANIC        0x00002 /* - panic "traceoff" mode    */
+#define         UT_HEADER       0x00004 /* - print header             */
+                                        /* Trace type:                */
+#define         UT_UTRACE       0x00100 /* - UTRACE                   */
+#define         UT_ITRACE       0x00200 /* - ITRACE                   */
+
+// For BWOS on BW hardware, USEG_BITS == 55 and 
+//    KSEG_BASE == (3 << 62))	   which is 0xc000000000000000
+//
+// For linux-on-X1 (sv2sim), 
+//    KSEG_BASE == (1 << 62)	   which is 0x4000000000000000
+//
+// For the image we are looking at, we need to be able to create kernel
+// memory addresses. So, get a known kernel address and
+// mask off the upper 9 bits to get the mask.
+
+
+    // 
+    // Most of this info comes from linux/include/asm-craynv/page.h
+    //
+
+#define KSEG_MASK  (0x1ff << 55)
+
+#define BW_X1_MASK (per_cpu__utrace_buffer & KSEG_MASK)
+
+#define BW_SYSPHYS_ENDPOINT_SHIFT 40
+#define X1_SYSPHYS_ENDPOINT_SHIFT 36
+
+#define BW_ADDRESS_SPACE 0xc000000000000000
+#define X1_ADDRESS_SPACE 0x4000000000000000
+
+#define BW_USEG_VA_BITMASK	0x000003ffffffffff
+#define BW_USEG_BITMASK		0x007fffffffffffff
+#define X1_USEG_BITMASK		0x0000ffffffffffff
+
+#define SYSPHYS_ENDPOINT_SHIFT ((BW_X1_MASK==BW_ADDRESS_SPACE) ? \
+				(BW_SYSPHYS_ENDPOINT_SHIFT) :    \
+				(X1_SYSPHYS_ENDPOINT_SHIFT))
+
+// The BlackWidow Utrace and Itrace buffer addresses are stored as
+// kphys addresses. Need to convert them to kernel virtual addresses.
+#define USEG_MASK ((BW_X1_MASK==BW_ADDRESS_SPACE) ? \
+		   (BW_USEG_VA_BITMASK) :    \
+		   (X1_USEG_BITMASK))
+
+#define VA_ADDR(x) (BW_X1_MASK | (USEG_MASK & (*(long*)x)))
+
+// single quote chars (like 'S' or '\0') don't work in sial
+#define ascii_NULL	0
+#define ascii_S		83
+#define ascii_Y		89
+
+#define IS_SYSCALL(a,b,c)	((a==ascii_S && b==ascii_Y && c==ascii_S))
+
+#define NSYSCALL	nsyscall
+
+#define SCNAME(N, err)					  \
+	((N) >= 0 && (N) < NSYSCALL ?			   \
+	(char*)(&system_call_names[(N)]) : (err))
+
+//
+// sial makes this harder than it should be. But print
+// each byte of the longword as a character
+// and before you ask;  no, "%8.8s",(char*)&l  doesn't work.
+//
+void
+print64(long l)
+{
+	long	sysname;
+	int	i, found_nul;
+	char	ar;
+
+	found_nul = -1;
+	// Fill the char array and record location of '\0'
+	for (i=0; (i < 8) && (found_nul < 0); i++) {
+		ar[i] = (char *)((l >> (64 - 8 * (i + 1))) & 0xff);
+		if (ar[i] == ascii_NULL) found_nul = i;
+	}
+
+	if (found_nul >= 0) {
+		// There are fewer than 8 characters in the string to be
+		// displayed, right align them.
+		found_nul--;
+		for (i=7; (i >= 0) && (found_nul >= 0); i--, found_nul--) {
+			ar[i] = ar[found_nul];
+		}
+		// Fill in the beginning with spaces for alignment
+		for (i; i >= 0; i--) {
+			ar[i] = ' ';
+		}
+	}
+
+	if(IS_SYSCALL(ar[5],ar[6],ar[7])) {
+		// Don't lose the ^, $, or @ characters
+		sysname = (((*(long*)(system_call_names+((l&0xffffff)*8))) >>
+		            8) & 0x00ffffffffffffff) | ((long)ar[4] << 56);
+		print64(sysname);
+	} else {
+		for (i=0; i < 8; i++) {
+			printf("%c", ar[i]);
+		}
+	}
+}
+
+void
+print_trace(trace_entry_t *tp, int cpu, string type)
+{
+	print64(tp->name);
+	printf(" 0x%03x %s 0x%016llx 0x%016llx 0x%016llx\n",
+		cpu, type, tp->rtc, tp->w1, tp->w2);
+}
+
+//
+// run through the trace buffers
+//
+void
+read_trace(trace_head_t *ut, trace_head_t *it, int entries, int cpu, int ut_only, int it_only)
+{
+	int		ients, uents, i;
+	trace_entry_t	*utp,*uth,*itp,*ith,*utplus,*itplus;    
+	long		uidx, newidx, ucnt, iidx, icnt;
+	string		ibuf="I";
+	string		ubuf="U";
+	
+	uents = ut->numentmask; 
+	ients = it->numentmask; 
+
+	utp=ut->ut_entry;
+	uth=(trace_entry_t *)VA_ADDR(&utp);
+
+	itp=it->ut_entry;
+	ith=(trace_entry_t *)VA_ADDR(&itp);
+
+	uidx = (long)uth->name & (long)ut->numentmask;
+	newidx=ucnt=uidx;
+	uidx *= sizeof(trace_entry_t);
+
+	iidx = (long)ith->name & (long)it->numentmask;
+	icnt=iidx;
+	iidx *= sizeof(trace_entry_t);
+
+	printf("Traces for CPU 0x%x\n", cpu);
+	utp = (trace_entry_t*)((long)uth + uidx);
+	itp = (trace_entry_t*)((long)ith + iidx);
+
+	itplus = utplus = (trace_entry_t *)0;
+
+	if (itp->name == 0x2b20202020202020) {
+		itplus = itp;
+		newidx = (int)((--icnt)&it->numentmask);
+		if(newidx == 0) {
+			newidx = icnt = it->numentmask;
+		}
+		iidx = ((int)sizeof(trace_entry_t)) * newidx;
+		itp = (trace_entry_t*)((long)ith + iidx);
+	}
+
+	if (utp->name == 0x2b20202020202020) {
+		utplus = utp;
+		newidx = (int)((--ucnt)&ut->numentmask);
+		if(newidx == 0) {
+			newidx = ucnt = ut->numentmask;
+		}
+		uidx = ((int)sizeof(trace_entry_t)) * newidx;
+		utp = (trace_entry_t*)((long)uth + uidx);
+	}
+
+	for(i=0;i<entries;i++) {
+		//
+		// If we have some entries and
+		// if we only want Itraces, or if we want both and
+		// the itrace rtc is greater...
+		//
+		if ((itp->rtc != 0 && ients > 0) &&
+		    (it_only || (!ut_only && (itp->rtc > utp->rtc)))) {
+			//
+			// Print any pending plus entry.
+			// Print the current trace entry. Get the next
+			// entry. If it's a plus entry, save it for later
+			// and get the entry after that.
+			//
+			if (itplus) {
+				print_trace(itplus,cpu,ibuf);
+				itplus = (trace_entry_t *)0;
+				entries--;
+				ients--;
+			}
+			print_trace(itp,cpu,ibuf);
+			ients--;
+			newidx = (int)((--icnt)&it->numentmask);
+
+			//
+			// skip entry zero which contains ptr and index
+			//
+			if(newidx == 0) {
+				newidx = icnt = it->numentmask;
+			}
+
+			iidx = ((int)sizeof(trace_entry_t)) * newidx;
+			itp = (trace_entry_t*)((long)ith + iidx);
+			if (itp->name == 0x2b20202020202020) {
+				itplus = itp;
+				newidx = (int)((--icnt)&it->numentmask);
+				if(newidx == 0) {
+					newidx = icnt = it->numentmask;
+				}
+				iidx = ((int)sizeof(trace_entry_t)) * newidx;
+				itp = (trace_entry_t*)((long)ith + iidx);
+			}
+
+		//
+		// Else, we only want Utraces, or the Utrace rtc is greater
+		//
+		} else if (!it_only && utp->rtc != 0 && uents > 0) {
+			//
+			// Print any pending plus entry.
+			// Print the current trace entry. Get the next
+			// entry. If it's a plus entry, save it for later
+			// and get the entry after that.
+			//
+			if (utplus) {
+				print_trace(utplus,cpu,ubuf);
+				utplus = (trace_entry_t *)0;
+				entries--;
+				uents--;
+			}
+			print_trace(utp,cpu,ubuf);
+			uents--;
+			newidx = (int)((--ucnt)&ut->numentmask);
+
+			//
+			// skip entry zero which contains ptr and index
+			//
+			if(newidx == 0) {
+				newidx = ucnt = ut->numentmask;
+			}
+
+			uidx = ((int)sizeof(trace_entry_t)) * newidx;
+			utp = (trace_entry_t*)((long)uth + uidx);
+			if (utp->name == 0x2b20202020202020) {
+				utplus = utp;
+				newidx = (int)((--ucnt)&ut->numentmask);
+				if(newidx == 0) {
+					newidx = ucnt = ut->numentmask;
+				}
+				uidx = ((int)sizeof(trace_entry_t)) * newidx;
+				utp = (trace_entry_t*)((long)uth + uidx);
+			}
+		}
+
+	}
+	return 0;
+}
+
+long
+UTRACE_INDEX(trace_head_t *tr)
+{
+	trace_entry_t	*tp,*th;
+	long		idx;
+
+	tp = tr->ut_entry;
+	th = (trace_entry_t *)VA_ADDR(&tp);
+	idx = (long)th->name & (long)tr->numentmask;
+	return idx;
+}
+
+void do_trace_header(string tag, tracebuf_t *tr)
+{
+	printf("%s magic ", tag);
+	print64(tr->magic);
+	printf(", name ");
+	print64(tr->name);
+	printf("\n");
+
+	printf("  flags 0x%016llx [", tr->flags);
+	if (tr->flags & UT_INIT) { printf(" UT_INIT"); }
+	if (tr->flags & UT_PANIC) { printf(" UT_PANIC"); }
+	if (tr->flags & UT_UTRACE) { printf(" UT_UTRACE"); }
+	if (tr->flags & UT_ITRACE) { printf(" UT_ITRACE"); }
+	printf(" ]\n");
+
+	printf("active: ent 0x%016llx ", tr->active.ut_addr);
+	printf("msk 0x%016llx ", tr->active.numentmask);
+	printf("idx 0x%016llx\n", UTRACE_INDEX(&tr->active));
+
+	printf("alter:  ent 0x%016llx ", tr->alternate.ut_addr);
+	printf("msk 0x%016llx ", tr->alternate.numentmask);
+	printf("idx 0x%016llx\n", tr->alternate.ut_entry ?
+		UTRACE_INDEX(&tr->alternate) : 0);
+
+	printf("sv alt: ent 0x%016llx ", tr->sv_active.ut_addr);
+	printf("msk 0x%016llx ", tr->sv_active.numentmask);
+	printf("idx 0x%016llx\n", tr->sv_active.ut_entry ?
+		UTRACE_INDEX(&tr->sv_active) : 0);
+}
+
+//
+// this is the main function called via sial within lcrash
+// when the user types "ut"
+//
+int 
+ut()
+{
+	long cpu_offset;
+	long cpu_utbuf;
+	long cpu_itbuf;
+	int entries, cpu, ut_only, it_only;
+	tracebuf_t *utb;
+	tracebuf_t *itb;
+	trace_head_t *utraceh;
+	trace_head_t *itraceh;
+
+	if(argc > 1) {
+		ut_showusage();
+		return;
+	}
+
+	ut_only = it_only = 0;
+
+	//
+	// Dump a default of 10 traces unless otherwise specified
+	//
+	if(nflag && atoi(narg)) { 
+		entries = atoi(narg);
+	} else {
+		entries = 10;
+	}
+
+	//
+	// Dump CPU 0 by default
+	//
+	if(cflag && atoi(carg)) { 
+		cpu = atoi(carg);
+		if (cpu >= *(long *)max_cpus) {
+			printf("Invalid cpu %d.\n", cpu);
+			ut_showusage();
+			return;
+		}
+	} else {
+		cpu = 0;
+	}
+
+	if(uflag && iflag) {
+		printf("Only one of -u and -i may be specified.\n");
+		ut_showusage();
+		return;
+	}
+
+	//
+	// Only print Utrace entries
+	//
+	if(uflag) { 
+		ut_only=1;
+	}
+
+	//
+	// Only print Itrace entries
+	//
+	if(iflag) { 
+		it_only=1;
+	}
+
+	cpu_offset = *(long *)(__per_cpu_offset+(cpu*sizeof(long)));
+	
+	cpu_utbuf = (per_cpu__utrace_buffer+cpu_offset);
+	cpu_itbuf = (per_cpu__itrace_buffer+cpu_offset);
+	
+	utb = (tracebuf_t *)cpu_utbuf;
+	itb = (tracebuf_t *)cpu_itbuf;
+
+	if (hflag) {
+		do_trace_header("UTRACE buffer", utb);
+		do_trace_header("ITRACE buffer", itb);
+	}
+
+	if (utb->flags & UT_PANIC) {
+		utraceh = (trace_head_t *)&utb->sv_active;
+	} else {
+		utraceh = (trace_head_t *)&utb->active;
+	}
+
+	if (itb->flags & UT_PANIC) {
+		itraceh = (trace_head_t *)&itb->sv_active;
+	} else {
+		itraceh = (trace_head_t *)&itb->active;
+	}
+
+	read_trace(utraceh, itraceh, entries,cpu, ut_only, it_only);
+
+	return 1;
+}
+int utrace() { return ut(); }

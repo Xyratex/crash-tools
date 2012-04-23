@@ -1,0 +1,328 @@
+//  -*- Mode: C -*-
+// Copyright 2007 Cray Inc. All Rights Reserved.
+//
+
+typedef unsigned short __u16;
+typedef unsigned int __u32;
+typedef unsigned long long __u64;
+
+typedef unsigned short	ptl_pid_t;
+typedef unsigned int	ptl_nid_t;
+
+#define isprint(a)	((a >=' ')&&(a <= '~'))
+#define min(a,b)	((a) < (b) ? (a) : (b))
+
+//
+// Return getopt style option list
+//
+string
+ptl_opt()
+{
+	return "ain:";
+}
+string ptltrace_opt() { return ptl_opt(); }
+
+//
+// Return standard usage message
+//
+string
+ptl_usage()
+{
+	return "[-a] [-i] [-n count]\n";
+}
+string ptltrace_usage() { return ptl_usage(); }
+
+static void
+ptl_showusage()
+{
+	printf("usage : ptltrace %s\n", ptl_usage());
+}
+static void ptltrace_showusage() { return ptl_showusage(); }
+
+//
+// Called from typing "help ptl" within lcrash
+//
+string
+ptl_help()
+{
+	return
+"This command displays the Portals trace.\n\n" +
+"\t-a List all entries\n" +
+"\t-i Print information about Portals trace buffer\n" +
+"\t-n Count of entries to list.  Default=30\n" +
+"\n";
+}
+string ptltrace_help() { return ptl_help(); }
+
+#define PTL_TRACE_NDATA		4		// Max data items in trace call
+#define PTL_TRACE_TAGLEN	8		// Max bytes in tag string
+
+typedef struct {
+	__u64		pe_time;		// timestamp for entry
+	char		pe_tag[PTL_TRACE_TAGLEN];// short tag string from call
+	__u16		pe_ndata;		// number of attached data itms
+	__u16		pe_seqno;		// beer msg sequence number
+	__u16		pe_relseqno;		// beer release sequence number
+	__u16		pe_type;		// fields from ptl msg hdr
+	ptl_pid_t	pe_src_pid;		//      "
+	ptl_nid_t	pe_src_nid;		//      "
+	ptl_pid_t	pe_dest_pid;		//      "
+	ptl_nid_t	pe_dest_nid;		//      "
+	__u64		pe_data[PTL_TRACE_NDATA];// context-specific fields
+} ptl_trace_ent_t;
+
+
+//
+// Function to find the first entry in the trace.
+//
+int
+ptl_find_first(ptl_trace_ent_t *pe, int nslots)
+{
+        int	i;
+        __u64	first_time;
+
+        if (pe == (ptl_trace_ent_t *)0) {
+                return 0;
+        }
+
+        first_time = pe->pe_time;
+
+        for (i=0; i < nslots; i++, pe++) {
+		if (pe->pe_time == 0) {
+			return 0;
+		}
+                if (pe->pe_time > 0 && pe->pe_time < first_time) {
+                        return (i);
+                }
+        }
+
+        return 0;
+}
+
+
+//
+// Function to print the supplied Portals message type.
+//
+void
+ptl_print_msg_type(unsigned int type)
+{
+	switch(type) {
+	case 0:
+		printf("ACK  ");
+		break;
+	case 1:
+		printf("PUT  ");
+		break;
+	case 2:
+		printf("GET  ");
+		break;
+	case 3:
+		printf("RPLY ");
+		break;
+	case 4:
+		printf("PAD1 ");
+		break;
+	case 5:
+		printf("PAD2 ");
+		break;
+	case 6:
+		printf("NOP  ");
+		break;
+	case 7:
+		printf("RLSE ");
+		break;
+	case 8:
+		printf("GETP ");
+		break;
+	case 9:
+		printf("GTPR ");
+		break;
+	case 10:
+		printf("NAK  ");
+		break;
+	case 11:
+		printf("PAD3 ");
+		break;
+	case 12:
+		printf("CGTP ");
+		break;
+	case 13:
+		printf("PAD4 ");
+		break;
+	case 14:
+		printf("GTAD ");
+		break;
+	default:
+        	printf("BAD  ");
+	}
+}
+
+
+//
+// Print the specified entry from the Portals trace buffer.
+//
+void
+ptl_print_trace_entry(ptl_trace_ent_t *pe)
+{
+	int	j;
+
+	if (pe->pe_time == 0) {
+		return;
+	}
+
+	printf("%016Lx:", pe->pe_time);
+	if (pe->pe_seqno == (__u16)-1) {
+	        printf("%4s[%4s] ", "none", "none");
+	} else {
+	        printf("%4x[%4x] ",
+	                pe->pe_seqno, pe->pe_relseqno);
+	}
+
+	ptl_print_msg_type(pe->pe_type);
+
+	printf("[%04x:%04x %04x:%04x] ",
+	        pe->pe_src_nid, pe->pe_src_pid,
+	        pe->pe_dest_nid, pe->pe_dest_pid);
+
+	for (j = 0; j<sizeof(pe->pe_tag); j++) {
+	        if (!isprint(pe->pe_tag[j])) {
+	                printf(" ");
+	        } else {
+	                printf("%c", pe->pe_tag[j]);
+	        }
+	}
+
+	for (j=0; j<min(pe->pe_ndata,(__u16)PTL_TRACE_NDATA); j++) {
+	        printf(" %016Lx", pe->pe_data[j]);
+	}
+	printf("\n");
+}
+
+
+//
+// Print the Portals trace buffer between the given start and
+// end points.
+//
+void
+ptl_print_trace(ptl_trace_ent_t *ptl_trace_table,
+		int entries,
+		int start,
+		int end)
+{
+
+	int		i, done;
+	ptl_trace_ent_t	*pe;
+
+	printf("TimeStamp         Seq RSeq  Type  SNid SPid DNid DPid  TraceTag Data\n");
+
+	pe = ptl_trace_table + start;
+	for (i = start, done = 0; !done; i = (i + 1) % entries) {
+		if (i >= entries) {
+			printf("ptl_print_trace: error: i = %d\n", i);
+			return;
+		}
+		ptl_print_trace_entry(pe);
+		if (i == (entries - 1)) {
+			pe = ptl_trace_table;
+		} else {
+			pe++;
+		}
+		done = (i == end);
+	}
+}
+
+
+//
+// This is the main function called via sial within lcrash
+// when the user types "ptl"
+//
+int
+ptl()
+{
+	int	entries, start, end;
+	int	print_count, print_all;
+	ptl_trace_ent_t	*ptl_trace_table;
+
+	if (argc > 1) {
+		ptl_showusage();
+		return 1;
+	}
+
+	//
+	// Dump a default of 30 traces unless otherwise specified
+	//
+	if (nflag && atoi(narg)) {
+		print_count = atoi(narg);
+	} else {
+		print_count = 30;
+	}
+
+	if (aflag) {
+		print_all = 1;
+	} else {
+		print_all = 0;
+	}
+
+	//
+	// Get the address of the Portals trace buffer, but 
+	// first make sure the Portals module was loaded
+	//
+	if (exists("ptl_trace_buf")) {
+		ptl_trace_table = *(ptl_trace_ent_t **)ptl_trace_buf;
+	} else {
+		printf("Cannot find Portals trace buffer\n");
+		return 1;
+	}
+
+	//
+	// Get the size of the Portals trace buffer
+	//
+	if (exists("ptl_trace_nslots")) {
+		entries = *(int *)ptl_trace_nslots;
+		if (entries <= 0) {
+			printf("Portals trace buffer size invalid\n");
+			return 1;
+		}
+	} else {
+		printf("Cannot find Portals trace buffer size\n");
+		return 1;
+	}
+
+	//
+	// Find the beginning and end of the trace
+	//
+	start = ptl_find_first(ptl_trace_table, entries);
+	end = start - 1 < 0 ? (entries - 1) : (start - 1);
+
+	//
+	// Just print information about the trace buffer if requested
+	//
+	if (iflag) {
+		printf("Portals trace buffer address 0x%p\n", ptl_trace_table);
+		printf("  %d trace entries\n", entries);
+		printf("  current entry %d, last entry %d\n", start, end);
+		return 1;
+	}
+
+	if (!print_all) {
+		if (print_count > entries) {
+			printf("Trace entry count larger than " +
+					"buffer size (%d)\n",
+					entries);
+			return 1;
+		}
+		start = end - (print_count - 1);
+		if (start < 0) {
+			start += entries;
+		}
+	}
+
+	//
+	// Print the trace
+	//
+	ptl_print_trace(ptl_trace_table, entries, start, end);
+
+	return 1;
+}
+
+int ptltrace() { return ptl(); }
