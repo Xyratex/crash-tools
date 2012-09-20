@@ -1,0 +1,120 @@
+#! /bin/bash
+
+# The next five lines are for configuring this script.  Either edit
+# the lines, or set the environment variables.  There are reasonable
+# defaults, if everything is in the current directory.
+#
+declare -r preconf_sysmap=${SYSMAP}
+declare -r preconf_vmlinux=${VMLINUX}
+declare -r preconf_dump=${DUMP}
+declare -r preconf_lustre_ext=${LUSTRE_EXT}
+declare -r preconf_ko_dirs=${KO_DIRS}
+
+declare -r prog=$(basename $0 .sh)
+declare -r progdir=$(cd $(dirname $0) > /dev/null ; pwd)
+declare -r program=${progdir}/$(basename $0)
+
+die() {
+    echo "$prog error:  $*"
+    echo "preserving temp directory $tmpdir"
+    trap '' 0
+    exit 1
+} >&2
+
+init() {
+    if test -f "${preconf_sysmap}"
+    then sysmap=${preconf_sysmap}
+    else
+        set -- *ystem.map*
+        test $# -eq 1 -a -f $1 || die 'System map cannot be located'
+        sysmap=$1
+    fi
+
+    if test -f "${preconf_vmlinux}"
+    then vmlinux=${preconf_vmlinux}
+    else
+        set -- *vmlinux*
+        test $# -eq 1 -a -f $1 || die 'vmlinux cannot be located'
+        vmlinux=$1
+    fi
+
+    if test -f "${preconf_dump}"
+    then dump=${preconf_dump}
+    else
+        dump=$(find * -type f -name dump.'*' | head -1)
+        test -f "$dump" || die 'cannot locate dump file'
+    fi
+
+    tmpdir=$(mktemp -d ${TMPDIR:-/tmp}/ell-XXXXXX)
+    test -d "$tmpdir" || die cannot make temp directory
+
+    if test -f "${preconf_lustre_ext}"
+    then lustre_ext=${preconf_lustre_ext}
+    else
+        lustre_ext=$(find * ~/.crash* -type f -name lustre-ext.so | head -1)
+        test -f "$lustre_ext" || die cannot find lustre-ext.so
+    fi
+}
+
+find_kos() {
+    # Do a preliminary examination of the dump in order to
+    # extract the version (release) of the OS and get a list
+    # of the modules that need loading.
+    #
+    ( crash --no_crashrc $vmlinux $sysmap $dump 2>&1 | \
+        awk '/(not loaded)/{print $2}
+		/^ *RELEASE:/{print}'
+    ) > ${tmpdir}/modules <<- \_EOF_
+	mod
+	quit
+	_EOF_
+
+    release=$(sed -n '/^ *RELEASE:/s/.*RELEASE: *//p' ${tmpdir}/modules)
+
+    if test ${#preconf_ko_dirs} -gt 0
+    then
+        set -- $(echo ${preconf_ko_dirs} | sed 's/:/ /g')
+        local mdir=
+
+    else
+        local mdir=/lib/modules/${release:-BOGUS}
+        test -d "$mdir" || mdir=
+        set -- * $mdir
+    fi
+
+    find $* -type f -name '*.ko' > ${tmpdir}/kofiles
+
+    exec 4> ${tmpdir}/c-cmd
+
+    for f in $(grep -v 'RELEASE: ' ${tmpdir}/modules)
+    do
+        g=$(egrep "(^|/)$f.ko\$" ${tmpdir}/kofiles | head -1)
+
+        test ${#g} -gt 0 && \
+            printf 'mod -s %16s %s\n' $f $g
+    done 1>&4
+
+    {
+        echo extend $lustre_ext
+        echo lustre -l ${tmpdir}/dk.data
+        echo quit
+    } 1>&4
+    exec 4>&-
+}
+
+run_crash() {
+    crash --no_crashrc -i ${tmpdir}/c-cmd $vmlinux $sysmap $dump \
+        > ${tmpdir}/log 2>&1
+    test -s ${tmpdir}/dk.data || \
+        die "Failed to run:  lustre -l ${tmpdir}/dk.data"$'\n' \
+		"$(<${tmpdir}/log)"
+    df=dk-text${dump##*dump}
+    lctl df ${tmpdir}/dk.data |tee $df|wc -l > ${tmpdir}/ln-ct
+    test $(<${tmpdir}/ln-ct) -gt 1 || die "lctl df did not parse ${tmpdir}/dk.data"
+    ls -l $df
+}
+
+init
+trap "rm -rf ${tmpdir}" 0
+find_kos
+run_crash

@@ -49,7 +49,7 @@ define walk_locks
       set $lock_ptr = (struct ldlm_lock *)((char *)$lock_list_ptr \
                   - $OFF_ldlm_lock_l_res_link)
       printf "ldlm_lock %p -- l_refc %d, readers %d, writers %d\n", \
-        $lock_ptr, $lock_ptr->lrefc.counter \
+        $lock_ptr, $lock_ptr->l_refc.counter, \
         $lock_ptr->l_readers, $lock_ptr->l_writers
       p $lock_ptr->l_policy_data
     end

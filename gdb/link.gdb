@@ -4,7 +4,12 @@
 define link2struct
   set $struct_off = (unsigned long)\
     &(((struct $arg1 *)0)->$arg2)
-  p (struct $arg1 *)((char *)$arg0 - $struct_off)
+  set $ptr = (struct $arg1 *)((char *)$arg0 - $struct_off)
+  if $argc > 3
+      $arg3 $ptr
+  else
+      p $ptr
+  end
 end
 
 document link2struct
@@ -25,7 +30,7 @@ define list_links
   while $curr != $start
     set $ptr = (struct $arg1 *)((char *)$curr - $struct_off)
     if $argc > 3
-      p $ptr->$arg3
+      $arg3 $ptr
     else
       p $ptr
     end
@@ -35,10 +40,10 @@ define list_links
 end
 
 document list_links
-  usage:  list_links <addr> <struct-name> <link-field> [ <show-field> ]
+  usage:  list_links <addr> <struct-name> <link-field> [ exec_func ]
 
   starting from "<addr>", show every "struct <struct-name>" structure
-  in the list linked by "<link-field>".  If "<show-field>" is provided,
-  that field is printed, otherwise the structure address is printed.
+  in the list linked by "<link-field>".  If "<exec-func>" is provided,
+  that function name executed, otherwise the structure address is printed.
 end
 # end: list_links
